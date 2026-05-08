@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
@@ -13,6 +14,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.hedera.hapi.node.base.NodeAddress;
+import com.hedera.hapi.node.base.NodeAddressBook;
 import com.hedera.hapi.node.base.SemanticVersion;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.io.IOException;
@@ -21,6 +24,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.hiero.block.api.BlockNodeVersions;
 import org.hiero.block.api.BlockNodeVersions.PluginVersion;
@@ -108,7 +114,14 @@ class BlockNodeAppTest {
         try {
             Files.deleteIfExists(Path.of("build/tmp/data/block/node/app-state-data.bin"));
         } catch (Exception e) {
-            // ignore the exception
+            // ignore
+        }
+        // Remove the RSA file written by addressBookPersistenceRoundTrip so subsequent tests
+        // start with a null address book rather than inheriting persisted state.
+        try {
+            Files.deleteIfExists(Path.of("build/resources/test/data/config/rsa-bootstrap-roster.json"));
+        } catch (Exception e) {
+            // ignore
         }
     }
 
@@ -295,11 +308,32 @@ class BlockNodeAppTest {
     }
 
     private static class TestPlugin implements BlockNodePlugin {
-        int contextUpdated = 0;
+        private final AtomicInteger contextUpdated = new AtomicInteger(0);
+        private volatile CountDownLatch latch = new CountDownLatch(0);
+
+        /** Call before the action under test to set how many `onContextUpdate` calls are expected. */
+        void expectContextUpdates(final int count) {
+            latch = new CountDownLatch(count);
+        }
+
+        /**
+         * Blocks until `onContextUpdate` has been called the expected number of times, or the
+         * timeout elapses (in which case the test fails).
+         */
+        void awaitContextUpdates(final long timeoutSeconds) throws InterruptedException {
+            assertTrue(
+                    latch.await(timeoutSeconds, TimeUnit.SECONDS),
+                    "onContextUpdate was not called within " + timeoutSeconds + "s");
+        }
+
+        int getContextUpdated() {
+            return contextUpdated.get();
+        }
 
         @Override
-        public void onContextUpdate(BlockNodeContext context) {
-            contextUpdated++;
+        public void onContextUpdate(final BlockNodeContext context) {
+            contextUpdated.incrementAndGet();
+            latch.countDown();
         }
     }
 
@@ -317,6 +351,7 @@ class BlockNodeAppTest {
         blockNodeApp.startApplicationStateFacility();
 
         blockNodeApp.loadedPlugins.add(testPlugin);
+        testPlugin.expectContextUpdates(1);
 
         blockNodeApp.updateTssData(null);
         blockNodeApp.updateTssData(
@@ -324,10 +359,10 @@ class BlockNodeAppTest {
         TssData tssData =
                 buildTssData(Bytes.fromHex("040506"), Bytes.fromHex("010203"), 1, 2, Bytes.fromHex("070809"), 100, 50);
         blockNodeApp.updateTssData(tssData);
-        // let the ApplicationStateFacility process the update
-        Thread.sleep(1_000);
+        // wait for the ApplicationStateFacility scanner to pick up the update
+        testPlugin.awaitContextUpdates(5);
 
-        assertEquals(1, testPlugin.contextUpdated);
+        assertEquals(1, testPlugin.getContextUpdated());
 
         // stop the ApplicationStateFacility manually as blockNodeApp.shutdown() is not being called
         blockNodeApp.stopApplicationStateFacility();
@@ -366,19 +401,22 @@ class BlockNodeAppTest {
         final BlockNodeApp blockNodeApp = new BlockNodeApp(serviceLoaderFunction, false);
         // start the ApplicationStateFacility manually as blockNodeApp.start() is not being called
         blockNodeApp.startApplicationStateFacility();
+        // Register a test plugin so we can await the scanner's onContextUpdate callback.
+        final TestPlugin testPlugin = new TestPlugin();
+        blockNodeApp.loadedPlugins.add(testPlugin);
+        testPlugin.expectContextUpdates(1);
         // update the tssData which should persist to disk
         TssData tssData =
                 buildTssData(Bytes.fromHex("010203"), Bytes.fromHex("040506"), 1, 2, Bytes.fromHex("070809"), 50, 100);
         blockNodeApp.updateTssData(tssData);
-        // let the ApplicationStateFacility process the update
-        Thread.sleep(1_000);
+        // wait for the scanner to process and persist the update
+        testPlugin.awaitContextUpdates(5);
 
         // create a new BlockNodeApp which will load the persisted TssData
         final BlockNodeApp blockNodeApp2 = new BlockNodeApp(serviceLoaderFunction, false);
-        // start the ApplicationStateFacility manually as start() is not being called
+        // startApplicationStateFacility loads state synchronously before the scheduler starts,
+        // so no additional waiting is needed after this call.
         blockNodeApp2.startApplicationStateFacility();
-        // let the ApplicationStateFacility process the update
-        Thread.sleep(1_000);
 
         TssData tssData1 = blockNodeApp2.blockNodeContext.tssData();
         assertNotNull(tssData1);
@@ -396,6 +434,202 @@ class BlockNodeAppTest {
         blockNodeApp2.stopApplicationStateFacility();
         // stop the ApplicationStateFacility manually as shutdown() is not being called
         blockNodeApp.stopApplicationStateFacility();
+    }
+
+    /**
+     * validateAddressBook rejects books with no entries or only blank RSA keys.
+     */
+    @Test
+    @DisplayName("validateAddressBook rejects empty book and all-blank RSA keys")
+    void validateAddressBookRejectsInvalidBooks() {
+        // empty node list
+        assertThrows(
+                IllegalStateException.class,
+                () -> BlockNodeApp.validateAddressBook(
+                        NodeAddressBook.newBuilder().build(), "test-empty"),
+                "Empty address book must throw");
+
+        // all entries have blank rsaPubKey
+        final NodeAddressBook allBlank = NodeAddressBook.newBuilder()
+                .nodeAddress(NodeAddress.newBuilder().nodeId(0).rsaPubKey("").build())
+                .build();
+        assertThrows(
+                IllegalStateException.class,
+                () -> BlockNodeApp.validateAddressBook(allBlank, "test-all-blank"),
+                "Book with only blank RSA keys must throw");
+    }
+
+    /**
+     * validateAddressBook accepts a book with at least one non-blank RSA key.
+     */
+    @Test
+    @DisplayName("validateAddressBook accepts book with at least one non-blank RSA key")
+    void validateAddressBookAcceptsValidBook() {
+        final NodeAddressBook valid = NodeAddressBook.newBuilder()
+                .nodeAddress(
+                        NodeAddress.newBuilder().nodeId(0).rsaPubKey("deadbeef").build())
+                .build();
+        assertDoesNotThrow(() -> BlockNodeApp.validateAddressBook(valid, "test-valid"));
+    }
+
+    /**
+     * updateAddressBook with null input is a no-op — context stays unchanged.
+     */
+    @Test
+    @DisplayName("updateAddressBook with null input is a no-op")
+    void updateAddressBookNullIsNoOp() throws IOException {
+        final ServiceLoaderFunction serviceLoaderFunction = new ServiceLoaderFunction();
+        final BlockNodeApp app = new BlockNodeApp(serviceLoaderFunction, false);
+        app.startApplicationStateFacility();
+        final NodeAddressBook before = app.blockNodeContext.nodeAddressBook();
+
+        app.updateAddressBook(null);
+
+        assertEquals(before, app.blockNodeContext.nodeAddressBook(), "null update must not change the address book");
+        app.stopApplicationStateFacility();
+    }
+
+    /**
+     * updateAddressBook with an empty or all-blank-key book is rejected; context stays unchanged.
+     */
+    @Test
+    @DisplayName("updateAddressBook rejects invalid books and leaves context unchanged")
+    void updateAddressBookInvalidBookIsRejected() throws IOException {
+        final ServiceLoaderFunction serviceLoaderFunction = new ServiceLoaderFunction();
+        final BlockNodeApp app = new BlockNodeApp(serviceLoaderFunction, false);
+        app.startApplicationStateFacility();
+
+        final NodeAddressBook emptyBook = NodeAddressBook.newBuilder().build();
+        app.updateAddressBook(emptyBook);
+        assertNull(app.blockNodeContext.nodeAddressBook(), "Empty book must be rejected");
+
+        final NodeAddressBook allBlank = NodeAddressBook.newBuilder()
+                .nodeAddress(NodeAddress.newBuilder().nodeId(0).rsaPubKey("").build())
+                .build();
+        app.updateAddressBook(allBlank);
+        assertNull(app.blockNodeContext.nodeAddressBook(), "All-blank-key book must be rejected");
+
+        app.stopApplicationStateFacility();
+    }
+
+    /**
+     * When the RSA bootstrap file does not exist the address book is null after startup.
+     */
+    @Test
+    @DisplayName("loadApplicationState with missing RSA file leaves address book null")
+    void loadApplicationStateMissingRsaFileAddressBookNull() throws IOException {
+        final ServiceLoaderFunction serviceLoaderFunction = new ServiceLoaderFunction();
+        final BlockNodeApp app = new BlockNodeApp(serviceLoaderFunction, false);
+        final Path rsaPath = app.blockNodeContext
+                .configuration()
+                .getConfigData(ApplicationStateConfig.class)
+                .rsaBootstrapFilePath();
+        Files.deleteIfExists(rsaPath);
+
+        app.startApplicationStateFacility();
+
+        assertNull(app.blockNodeContext.nodeAddressBook(), "Missing RSA file must leave address book null");
+        app.stopApplicationStateFacility();
+    }
+
+    /**
+     * When the RSA bootstrap file exists but is corrupt, startApplicationStateFacility throws.
+     */
+    @Test
+    @DisplayName("loadApplicationState with corrupt RSA file throws IllegalStateException")
+    void loadApplicationStateCorruptRsaFileThrows() throws IOException {
+        final ServiceLoaderFunction serviceLoaderFunction = new ServiceLoaderFunction();
+        final BlockNodeApp app = new BlockNodeApp(serviceLoaderFunction, false);
+        final Path rsaPath = app.blockNodeContext
+                .configuration()
+                .getConfigData(ApplicationStateConfig.class)
+                .rsaBootstrapFilePath();
+        Files.createDirectories(rsaPath.getParent());
+        Files.write(rsaPath, new byte[] {(byte) 0xFF, (byte) 0xFE, 0x00});
+
+        assertThrows(
+                IllegalStateException.class,
+                app::startApplicationStateFacility,
+                "Corrupt RSA file must throw IllegalStateException");
+        app.stopApplicationStateFacility();
+    }
+
+    /**
+     * updateAddressBook queues the book for the scanner and context is updated on the next tick.
+     */
+    @Test
+    @DisplayName("updateAddressBook queues book; scanner picks it up and notifies plugins")
+    void updateAddressBookQueuesForScanner() throws IOException, InterruptedException {
+        final ServiceLoaderFunction serviceLoaderFunction = new ServiceLoaderFunction();
+        final BlockNodeApp app = new BlockNodeApp(serviceLoaderFunction, false);
+        final TestPlugin testPlugin = new TestPlugin();
+        app.startApplicationStateFacility();
+        app.loadedPlugins.add(testPlugin);
+
+        final int updatesBeforeCall = testPlugin.getContextUpdated();
+        testPlugin.expectContextUpdates(1);
+
+        final NodeAddressBook book = NodeAddressBook.newBuilder()
+                .nodeAddress(
+                        NodeAddress.newBuilder().nodeId(1).rsaPubKey("aabbcc").build())
+                .build();
+        app.updateAddressBook(book);
+
+        // wait for the scanner to pick up the pending address book and call onContextUpdate
+        testPlugin.awaitContextUpdates(5);
+
+        assertEquals(
+                updatesBeforeCall + 1,
+                testPlugin.getContextUpdated(),
+                "onContextUpdate must be called once for the address book update");
+        assertNotNull(app.blockNodeContext.nodeAddressBook());
+        assertEquals(1, app.blockNodeContext.nodeAddressBook().nodeAddress().size());
+        assertEquals(
+                "aabbcc",
+                app.blockNodeContext.nodeAddressBook().nodeAddress().getFirst().rsaPubKey());
+
+        app.stopApplicationStateFacility();
+    }
+
+    /**
+     * Address book persisted by updateAddressBook is reloaded by a fresh BlockNodeApp.
+     */
+    @Test
+    @DisplayName("address book is persisted and reloaded on next startup")
+    void addressBookPersistenceRoundTrip() throws IOException, InterruptedException {
+        final ServiceLoaderFunction serviceLoaderFunction = new ServiceLoaderFunction();
+        final BlockNodeApp app = new BlockNodeApp(serviceLoaderFunction, false);
+        final Path rsaPath = app.blockNodeContext
+                .configuration()
+                .getConfigData(org.hiero.block.node.app.config.state.ApplicationStateConfig.class)
+                .rsaBootstrapFilePath();
+
+        app.startApplicationStateFacility();
+        final TestPlugin testPlugin = new TestPlugin();
+        app.loadedPlugins.add(testPlugin);
+        testPlugin.expectContextUpdates(1);
+
+        final NodeAddressBook book = NodeAddressBook.newBuilder()
+                .nodeAddress(
+                        NodeAddress.newBuilder().nodeId(7).rsaPubKey("cafebabe").build())
+                .build();
+        app.updateAddressBook(book);
+        // wait for scanner to process and persist the address book
+        testPlugin.awaitContextUpdates(5);
+        app.stopApplicationStateFacility();
+
+        assertTrue(Files.exists(rsaPath), "RSA file must exist after persistence");
+
+        // second app loads from persisted file
+        final BlockNodeApp app2 = new BlockNodeApp(serviceLoaderFunction, false);
+        app2.startApplicationStateFacility();
+
+        final NodeAddressBook loaded = app2.blockNodeContext.nodeAddressBook();
+        assertNotNull(loaded, "Persisted address book must be loaded on restart");
+        assertEquals(1, loaded.nodeAddress().size());
+        assertEquals("cafebabe", loaded.nodeAddress().getFirst().rsaPubKey());
+
+        app2.stopApplicationStateFacility();
     }
 
     /// build a `TssData` object from individual fields from the `TssBootstrapConfig`
