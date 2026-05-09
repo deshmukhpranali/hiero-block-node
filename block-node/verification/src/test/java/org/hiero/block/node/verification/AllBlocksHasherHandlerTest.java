@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.hiero.block.api.BlockNodeVersions;
+import org.hiero.block.api.TssData;
 import org.hiero.block.common.hasher.HashingUtilities;
 import org.hiero.block.common.hasher.NaiveStreamingTreeHasher;
 import org.hiero.block.common.hasher.StreamingHasher;
@@ -317,8 +318,8 @@ class AllBlocksHasherHandlerTest {
                 mock(ServiceLoaderFunction.class),
                 mock(ThreadPoolManager.class),
                 BlockNodeVersions.DEFAULT,
-                null,
-                null);
+                TssData.DEFAULT,
+                com.hedera.hapi.node.base.NodeAddressBook.DEFAULT);
     }
 
     private void persistHasher(final Path hasherPath, final List<byte[]> blockHashes)

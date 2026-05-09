@@ -9,6 +9,7 @@ import static java.lang.System.Logger.Level.WARNING;
 import com.hedera.cryptography.tss.TSS;
 import com.hedera.cryptography.wraps.WRAPSVerificationKey;
 import com.hedera.hapi.block.stream.output.BlockHeader;
+import com.hedera.hapi.node.base.NodeAddressBook;
 import com.hedera.hapi.node.base.SemanticVersion;
 import com.hedera.hapi.node.tss.LedgerIdNodeContribution;
 import com.hedera.hapi.node.tss.LedgerIdPublicationTransactionBody;
@@ -18,7 +19,9 @@ import edu.umd.cs.findbugs.annotations.NonNull;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.security.PublicKey;
 import java.util.List;
+import java.util.Map;
 import org.hiero.block.node.app.config.node.NodeConfig;
 import org.hiero.block.node.spi.BlockNodeContext;
 import org.hiero.block.node.spi.BlockNodePlugin;
@@ -57,6 +60,15 @@ public class VerificationServicePlugin implements BlockNodePlugin, BlockItemHand
     /** Metric key for block hashing time */
     public static final MetricKey<LongCounter> METRIC_HASHING_BLOCK_TIME =
             MetricKey.of("hashing_block_time", LongCounter.class).addCategory(METRICS_CATEGORY);
+    /** Metric key for WRB blocks whose RSA proof was accepted */
+    public static final MetricKey<LongCounter> METRIC_RSA_VERIFICATION_SUCCESS =
+            MetricKey.of("rsa_verification_success_total", LongCounter.class).addCategory(METRICS_CATEGORY);
+    /** Metric key for WRB blocks whose RSA proof was rejected */
+    public static final MetricKey<LongCounter> METRIC_RSA_VERIFICATION_FAILURE =
+            MetricKey.of("rsa_verification_failure_total", LongCounter.class).addCategory(METRICS_CATEGORY);
+    /** Metric key for signatures from `node_id` values not present in the loaded address book */
+    public static final MetricKey<LongCounter> METRIC_RSA_ROSTER_MISMATCH =
+            MetricKey.of("rsa_roster_mismatch_total", LongCounter.class).addCategory(METRICS_CATEGORY);
 
     private static final String COMPLETED_MESSAGE = "Verified backfill block items for block={0} with success={1}";
     /** The logger for this class. */
@@ -82,6 +94,18 @@ public class VerificationServicePlugin implements BlockNodePlugin, BlockItemHand
     private LongCounter.Measurement verificationBlockTime;
     /** Metric for block hashing time. ignores time to receive block */
     private LongCounter.Measurement hashingBlockTimeNs;
+    /** Metric for accepted RSA WRB proof verifications. */
+    private LongCounter.Measurement rsaVerificationSuccessTotal;
+    /** Metric for rejected RSA WRB proof verifications. */
+    private LongCounter.Measurement rsaVerificationFailureTotal;
+    /** Metric for signatures from `node_id` values absent from the loaded address book. */
+    private LongCounter.Measurement rsaRosterMismatchTotal;
+    /**
+     * Most recent `node_id → PublicKey` map built from the `NodeAddressBook` delivered by
+     * `RsaRosterBootstrapPlugin`. Volatile so that `onContextUpdate` writes are visible to the
+     * block-handling thread without a lock.
+     */
+    private volatile Map<Long, PublicKey> keyByNodeId = Map.of();
     /** The previous block hash, used for verification of the current block. */
     private Bytes previousBlockHash;
     /** The block number of the last successfully verified block (live-stream or sequential backfill). */
@@ -140,6 +164,18 @@ public class VerificationServicePlugin implements BlockNodePlugin, BlockItemHand
                 .getOrCreateNotLabeled();
         hashingBlockTimeNs = metricRegistry
                 .register(LongCounter.builder(METRIC_HASHING_BLOCK_TIME).setDescription("Hashing time per block (ms)"))
+                .getOrCreateNotLabeled();
+        rsaVerificationSuccessTotal = metricRegistry
+                .register(LongCounter.builder(METRIC_RSA_VERIFICATION_SUCCESS)
+                        .setDescription("WRB blocks whose RSA SignedRecordFileProof was accepted"))
+                .getOrCreateNotLabeled();
+        rsaVerificationFailureTotal = metricRegistry
+                .register(LongCounter.builder(METRIC_RSA_VERIFICATION_FAILURE)
+                        .setDescription("WRB blocks whose RSA SignedRecordFileProof was rejected"))
+                .getOrCreateNotLabeled();
+        rsaRosterMismatchTotal = metricRegistry
+                .register(LongCounter.builder(METRIC_RSA_ROSTER_MISMATCH)
+                        .setDescription("RSA signatures from node_id values absent from the loaded address book"))
                 .getOrCreateNotLabeled();
     }
 
@@ -202,6 +238,45 @@ public class VerificationServicePlugin implements BlockNodePlugin, BlockItemHand
 
     /**
      * {@inheritDoc}
+     *
+     * <p>Called by the framework whenever `BlockNodeApp.updateAddressBook()` fires — typically once
+     * at startup by `RsaRosterBootstrapPlugin`. Rebuilds the `node_id → PublicKey` map used by
+     * subsequent WRB verification sessions. A volatile write ensures visibility to the
+     * block-handler thread without a lock.
+     */
+    @Override
+    public void onContextUpdate(final BlockNodeContext updatedContext) {
+        final NodeAddressBook book = updatedContext.nodeAddressBook();
+        if (book == null || book.nodeAddress().isEmpty()) {
+            LOGGER.log(
+                    WARNING,
+                    "onContextUpdate called with a null or empty NodeAddressBook — RSA key map not updated."
+                            + " WRB blocks will fail verification until a valid address book is delivered.");
+            return;
+        }
+        // Count non-blank address book entries — these are the nodes that should be signable.
+        final int declaredCount = (int) book.nodeAddress().stream()
+                .filter(a -> !a.rsaPubKey().isBlank())
+                .count();
+        keyByNodeId = RsaKeyDecoder.buildKeyMap(book);
+        final int effectiveCount = keyByNodeId.size();
+        if (effectiveCount < declaredCount) {
+            // Malformed DER keys were skipped; threshold is calculated against effectiveCount.
+            // Fix the address book so all declared nodes can contribute signatures.
+            LOGGER.log(
+                    WARNING,
+                    "RSA key map: {0}/{1} keys decoded successfully; {2} node(s) had malformed"
+                            + " hex-DER bytes and cannot contribute signatures. Verification"
+                            + " threshold is calculated against the {0} decodable keys.",
+                    effectiveCount,
+                    declaredCount,
+                    declaredCount - effectiveCount);
+        }
+        LOGGER.log(INFO, "RSA key map updated: {0}/{1} nodes loaded from address book", effectiveCount, declaredCount);
+    }
+
+    /**
+     * {@inheritDoc}
      */
     @Override
     public void start() {
@@ -258,7 +333,11 @@ public class VerificationServicePlugin implements BlockNodePlugin, BlockItemHand
                         semanticVersion,
                         previousHash,
                         getRootOfAllPreviousBlocks(),
-                        activeLedgerId);
+                        activeLedgerId,
+                        keyByNodeId,
+                        rsaVerificationSuccessTotal,
+                        rsaVerificationFailureTotal,
+                        rsaRosterMismatchTotal);
                 LOGGER.log(DEBUG, "Started new block verification session for block number {0}", currentBlockNumber);
             } else {
                 headerValid = true; // header not present, assume it was valid
@@ -414,7 +493,11 @@ public class VerificationServicePlugin implements BlockNodePlugin, BlockItemHand
                         blockHeader.hapiProtoVersionOrThrow(),
                         null,
                         null,
-                        activeLedgerId);
+                        activeLedgerId,
+                        keyByNodeId,
+                        rsaVerificationSuccessTotal,
+                        rsaVerificationFailureTotal,
+                        rsaRosterMismatchTotal);
                 // process the block items in the backfilled notification
                 // For backfill, we wrap items in BlockItems with isEndOfBlock=true (last item should be block proof)
                 BlockItems backfillBlockItems =
