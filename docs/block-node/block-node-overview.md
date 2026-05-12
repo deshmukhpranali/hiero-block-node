@@ -7,8 +7,7 @@ This overview document provides operators with the essential concepts needed to 
 ## What is a Block Node?
 
 A Block Node is a special kind of server that keeps a complete, trustworthy copy of what is happening on a Hiero network.
-
-It receives a stream of already-agreed blocks from Consensus Nodes, checks that each block is valid, and then stores those blocks and serves verifiable state snapshots so both blocks and state can be queried later.
+It receives a stream of already-agreed blocks from Consensus Nodes, checks that each block is valid, and then stores those blocks and serves state snapshots so both blocks and state can be queried later.
 
 Instead of pushing this data into centralized cloud storage, Block Nodes act as a decentralized data layer for the network.
 They stream blocks to Mirror Nodes and other Block Nodes, answer questions from apps and services about past blocks or current state, and provide cryptographic proofs so users can independently verify that the data is correct.
@@ -19,7 +18,7 @@ They stream blocks to Mirror Nodes and other Block Nodes, answer questions from 
 |--------------------------------|---------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
 | Primary role                   | Reach consensus and update canonical state.                                                       | Ingest, verify, store, and serve blocks, and state.                                                             | Provide value‑added access to historical data and analytics.                                                                       |
 | Produces blocks                | Yes – produces finalized block streams per **([HIP-1056](https://hips.hedera.com/hip/hip-1056))** | No – consumes and verifies blocks from Consensus Nodes or upstream Block Nodes.                                 | No – will consume data from Block Nodes once the cutover lands; today Mirror Nodes still download record files from cloud storage. |
-| Maintains full consensus state | Yes – authoritative state, optimized for consensus.                                               | Stores and serves state snapshots produced by Consensus Nodes; supports reconnect flows.                        | No – maintains data in an indexed form as needed for queries and analytics.                                                        |
+| Maintains full consensus state | Yes – authoritative state, optimized for consensus.                                               | Manages an active copy of network state locally, updated with `State Changes`; supports reconnect flows.        | No – maintains data in an indexed form as needed for queries and analytics.                                                        |
 | Data APIs                      | gRPC for transactions/queries; no history.                                                        | Streaming gRPC APIs for live and historical blocks, random-access retrieval, state, and proofs.                 | Public REST and custom APIs for queries and observability.                                                                         |
 | Who runs it                    | Governing Council and approved operators.                                                         | Tier 1: Council / trusted; Tier 2: permissionless operators, service providers, app teams, and infra providers. | Permissionless operators, service providers, and app teams.                                                                        |
 
@@ -34,7 +33,7 @@ Before diving deeper, familiarize yourself with these core concepts:
 
 - **Aggregated Signatures** - Cryptographic signatures from multiple Consensus Nodes combined into a single compact signature. Verification uses the network's Ledger ID — the hash of the genesis TSS Address Book — to confirm a block was finalized by network consensus. For post-genesis blocks, **WRAPS (Weighted Roster Attestation Proof System)** proofs attest that the active roster is a valid descendant of the genesis roster, ensuring verification remains trustworthy as the roster evolves over time. Defined in [HIP-1200](https://hips.hedera.com/hip/hip-1200); the trusted-setup ceremony that produces the WRAPS public parameters is specified in [HIP-1398](https://github.com/hiero-ledger/hiero-improvement-proposals/pull/1398) (draft).
 
-- **Reconnect Services** - APIs and data streams that will help Consensus Nodes catch up to the current network state after downtime or network partitions by providing recent blocks and state snapshots. Service interfaces are defined; this capability is currently in active development for a future release.
+- **Reconnect Services** - APIs and data streams that will help Consensus Nodes catch up to the current network state after downtime or network partitions by providing recent blocks and state snapshots. Service interfaces are defined; this capability is planned for a future release and is not currently in active development.
 
 - **Tier 1 Block Node** – A Block Node that receives block streams directly from Consensus Nodes and typically provides reconnect/state snapshot services back to the network.
 
@@ -42,7 +41,7 @@ Before diving deeper, familiarize yourself with these core concepts:
 
 ## Role in the Hiero Network
 
-Block Nodes act as the trusted historians and data providers for a Hiero network. They receive block streams from Consensus Nodes, verify that each block and its data are correct, and durably store the blocks together with the verifiable state snapshots produced by the network.
+Block Nodes act as the trusted historians and data providers for a Hiero network. They receive block streams from Consensus Nodes, verify that each block and its data are correct, apply the included `State Changes` to maintain a local copy of network state, and durably store both the blocks and the state snapshots they produce.
 By doing so, Block Nodes replace old methods of storing network data in centralized cloud buckets and instead make this data reliably available in a decentralized way.
 
 Block Nodes distribute blocks to downstream clients—including Mirror Nodes, other Block Nodes, and applications—so anyone can access real-time or historical data.
@@ -60,7 +59,7 @@ Block Nodes provide several core services that turn block streams into reliable,
 - Durable storage of blocks, and consensus state.
 - Real-time and historical data streaming to downstream clients.
 - Random-access retrieval of blocks and state at specific block heights.
-- State snapshot storage and serving, plus reconnect services (currently in active development) to help Consensus Nodes catch up or recover.
+- State snapshot creation, plus reconnect services (not currently in active development) to help Consensus Nodes catch up or recover.
 
 ## Example Use Cases
 
@@ -72,12 +71,12 @@ Block Nodes provide several core services that turn block streams into reliable,
 
 A Block Node's *tier* describes where it gets its block stream from. The same core software runs at every tier; the differences are operational.
 
-| **Tier** |                         **Description**                          |        **Typical Operators**        |               **Key Focus**               |
-|----------|------------------------------------------------------------------|-------------------------------------|-------------------------------------------|
-| Tier 1   | Receive streams directly from Consensus Nodes; high reliability. | Governing Council, trusted entities | Verification, reconnect, state snapshots. |
-| Tier 2   | Receive streams from Tier 1 or another Tier 2; permissionless.   | Community, enterprises              | Streaming, proofs, geographic redundancy. |
+| **Tier** |                         **Description**                          |        **Typical Operators**        |               **Key Focus**                |
+|----------|------------------------------------------------------------------|-------------------------------------|--------------------------------------------|
+| Tier 1   | Receive streams directly from Consensus Nodes; high reliability. | Governing Council, trusted entities | Verification, reconnect, state management. |
+| Tier 2   | Receive streams from Tier 1 or another Tier 2; permissionless.   | Community, enterprises              | Streaming, proofs, geographic redundancy.  |
 
-Beyond tiers, operators can deploy a Block Node in different *types* — for example *Full Node*, *Rolling-History*, *Light Node*, *Private-Cloud*, *Archive Server*, or *Community Node* — by combining different sets of plugins. *Rolling-History* provides a Partial History service, retaining only recent blocks rather than full history. *Archive Server* provides cold storage and on-demand retrieval without live streaming. See [Block-Node-Types.md](../Block-Node-Types.md) for the full taxonomy.
+Beyond tiers, operators can deploy a Block Node in different *types* — for example *Full Node*, *Rolling-History*, *Light Node*, *Private-Cloud*, *Archive Server*, or *Community Node* — by combining different sets of plugins. *Rolling-History* provides a Partial History service, retaining only recent blocks rather than full history. *Archive Server* provides cold storage without live streaming. See [Block-Node-Types.md](../Block-Node-Types.md) for the full taxonomy.
 
 ## High-Level Architecture
 
@@ -85,7 +84,7 @@ Block Nodes follow a modular design, receiving **block streams**, verifying inte
 They may provide four common functions:
 
 - **Block Stream ingestion and verification** - Receives block streams from Consensus Nodes and verifies their integrity using aggregated signatures and Merkle proofs.
-- **State snapshot management** - Stores the verifiable state snapshots produced by Consensus Nodes and serves them through dedicated APIs to support reconnect and recovery flows. Live, fully replicated consensus state on Block Nodes is a roadmap goal, not a current capability.
+- **State management and snapshot generation** *(planned)* - Block Nodes will maintain an active local copy of network state by applying `State Changes` from the block stream and generate state snapshots served through dedicated APIs to support reconnect and recovery flows. State management is a prerequisite for reconnect support; neither is currently implemented.
 - **Durable storage** - Persists blocks and saved states to local disk or to S3-compatible archival storage for long-term, tamper-evident history.
 - **Data services** - Exposes gRPC/REST APIs providing real-time block streaming, random-access block retrieval, state queries at specific block heights, and cryptographic proofs to Mirror Nodes, other Block Nodes, and applications.
 
