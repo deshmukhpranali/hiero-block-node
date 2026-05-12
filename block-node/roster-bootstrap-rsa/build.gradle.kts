@@ -10,6 +10,7 @@ tasks.withType<JavaCompile>().configureEach { options.compilerArgs.add("-Xlint:-
 mainModuleInfo { runtimeOnly("com.swirlds.config.impl") }
 
 testModuleInfo {
-    runtimeOnly("org.junit.jupiter.api")
-    runtimeOnly("org.hiero.block.node.app.test.fixtures")
+    requires("org.junit.jupiter.api")
+    requires("org.hiero.block.node.app.test.fixtures")
+    requires("jdk.httpserver")
 }
