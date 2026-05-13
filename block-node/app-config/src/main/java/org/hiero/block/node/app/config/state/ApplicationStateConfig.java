@@ -20,19 +20,14 @@ import org.hiero.block.node.base.Loggable;
  *     Defaults to {@code /opt/hiero/block-node/node/rsa-bootstrap-roster.json}.
  * @param updateScanInterval The amount of milliseconds that the {@code ApplicationStateFacility} waits between
  *     checking to see if there are any {@code TssData} updates to process.
- * @param updateInitialDelay The amount of milliseconds that the {@code ApplicationStateFacility} waits before
- *     starting the scan interval.
  */
 @ConfigData("app.state")
 public record ApplicationStateConfig(
-        @Loggable @ConfigProperty(defaultValue = "/opt/hiero/block-node/node/app-state-data.bin")
+        @Loggable @ConfigProperty(defaultValue = "/opt/hiero/block-node/node/app-state-data.json")
         Path dataFilePath,
 
         @Loggable @ConfigProperty(defaultValue = "/opt/hiero/block-node/node/rsa-bootstrap-roster.json")
         Path rsaBootstrapFilePath,
 
         @Loggable @ConfigProperty(defaultValue = "500") @Min(100)
-        long updateScanInterval,
-
-        @Loggable @ConfigProperty(defaultValue = "100") @Min(100)
-        int updateInitialDelay) {}
+        long updateScanInterval) {}
