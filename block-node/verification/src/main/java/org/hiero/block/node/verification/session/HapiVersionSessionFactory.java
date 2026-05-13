@@ -11,7 +11,6 @@ import org.hiero.block.common.utils.Preconditions;
 import org.hiero.block.node.spi.blockmessaging.BlockSource;
 import org.hiero.block.node.verification.session.impl.DummyVerificationSession;
 import org.hiero.block.node.verification.session.impl.ExtendedMerkleTreeSession;
-import org.hiero.metrics.LongCounter;
 
 /**
  * Factory for creating `VerificationSession` instances based on the requested HAPI version.
@@ -25,8 +24,7 @@ public final class HapiVersionSessionFactory {
     /**
      * Creates a `VerificationSession` for the given HAPI version.
      *
-     * <p>Delegates to `createSession` with an empty RSA key map and no RSA metrics. Use
-     * `createSession(...)` with the RSA parameters when a `NodeAddressBook` is available.
+     * <p>Delegates to `createSession` with an empty RSA key map and {@link VerificationProofMetrics#NONE}.
      *
      * @param blockNumber the block number (>= 0)
      * @param blockSource the source of blocks
@@ -52,9 +50,7 @@ public final class HapiVersionSessionFactory {
                 allPreviousBlocksRootHash,
                 ledgerId,
                 Map.of(),
-                null,
-                null,
-                null);
+                VerificationProofMetrics.NONE);
     }
 
     /**
@@ -62,7 +58,7 @@ public final class HapiVersionSessionFactory {
      *
      * <p>When `rsaKeyByNodeId` is non-empty and the block carries a `SignedRecordFileProof`,
      * the returned session will attempt RSA verification using the provided key map and
-     * will report results via the supplied metric counters (when non-null).
+     * will report results via {@code metrics}.
      *
      * @param blockNumber the block number (>= 0)
      * @param blockSource the source of blocks
@@ -71,10 +67,9 @@ public final class HapiVersionSessionFactory {
      * @param allPreviousBlocksRootHash the all-blocks root hash, may be null
      * @param ledgerId the trusted ledger ID for TSS verification, may be null
      * @param rsaKeyByNodeId map from `node_id` to RSA `PublicKey`; use `Map.of()` when unavailable
-     * @param rsaVerificationSuccessTotal metric for successful RSA verifications, may be null
-     * @param rsaVerificationFailureTotal metric for failed RSA verifications, may be null
-     * @param rsaRosterMismatchTotal metric for sigs from unknown nodes, may be null
-     * @throws NullPointerException if `blockSource`, `hapiVersion`, or `rsaKeyByNodeId` is null
+     * @param metrics holder of per-proof-type verification counters; use
+     *     {@link VerificationProofMetrics#NONE} when not wired
+     * @throws NullPointerException if `blockSource`, `hapiVersion`, `rsaKeyByNodeId`, or `metrics` is null
      * @throws IllegalArgumentException if `blockNumber` is less than 0 or the version is unsupported
      */
     public static VerificationSession createSession(
@@ -85,12 +80,11 @@ public final class HapiVersionSessionFactory {
             final Bytes allPreviousBlocksRootHash,
             @Nullable final Bytes ledgerId,
             final Map<Long, PublicKey> rsaKeyByNodeId,
-            @Nullable final LongCounter.Measurement rsaVerificationSuccessTotal,
-            @Nullable final LongCounter.Measurement rsaVerificationFailureTotal,
-            @Nullable final LongCounter.Measurement rsaRosterMismatchTotal) {
+            final VerificationProofMetrics metrics) {
         Objects.requireNonNull(blockSource, "blockSource cannot be null");
         Objects.requireNonNull(hapiVersion, "hapiVersion cannot be null");
         Objects.requireNonNull(rsaKeyByNodeId, "rsaKeyByNodeId cannot be null");
+        Objects.requireNonNull(metrics, "metrics cannot be null");
         Preconditions.requireWhole(blockNumber, "blockNumber must be >= 0");
 
         if (isGreaterThanOrEqual(hapiVersion, V_0_72_0)) {
@@ -101,9 +95,7 @@ public final class HapiVersionSessionFactory {
                     allPreviousBlocksRootHash,
                     ledgerId,
                     rsaKeyByNodeId,
-                    rsaVerificationSuccessTotal,
-                    rsaVerificationFailureTotal,
-                    rsaRosterMismatchTotal);
+                    metrics);
         }
 
         // TODO, before going live we should remove the Dummy Implementation.

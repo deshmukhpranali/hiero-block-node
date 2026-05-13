@@ -154,14 +154,16 @@ Observes outbound streams served to subscribers.
 **Plugin:** `verification [block-node-verification]`
 Measures block‑verification throughput and success rate.
 
-|  Type   |              Name              |                 Description                  |
-|---------|--------------------------------|----------------------------------------------|
-| Counter | `verification_blocks_received` | Blocks received for verification             |
-| Counter | `verification_blocks_verified` | Blocks that passed verification              |
-| Counter | `verification_blocks_failed`   | Blocks that failed verification              |
-| Counter | `verification_blocks_error`    | Internal errors during verification          |
-| Counter | `verification_block_time`      | Verification time per block (ns=nanoseconds) |
-| Counter | `hashing_block_time`           | Hashing time per block (ns=nanoseconds)      |
+|  Type   |              Name              |                                            Description                                            |
+|---------|--------------------------------|---------------------------------------------------------------------------------------------------|
+| Counter | `verification_blocks_received` | Blocks received for verification                                                                  |
+| Counter | `verification_blocks_verified` | Blocks that passed verification                                                                   |
+| Counter | `verification_blocks_failed`   | Blocks that failed verification                                                                   |
+| Counter | `verification_blocks_error`    | Internal errors during verification                                                               |
+| Counter | `verification_block_time`      | Verification time per block (ns=nanoseconds)                                                      |
+| Counter | `hashing_block_time`           | Hashing time per block (ns=nanoseconds)                                                           |
+| Counter | `verification_proof_total`     | Block proof verifications, labels: `proof_type={rsa,state_proof,tss}`, `result={success,failure}` |
+| Counter | `rsa_roster_mismatch_total`    | RSA signatures from node IDs absent from the loaded address book                                  |
 
 ---
 

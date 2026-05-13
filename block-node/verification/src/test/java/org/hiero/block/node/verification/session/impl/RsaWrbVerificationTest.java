@@ -31,6 +31,7 @@ import org.hiero.block.internal.BlockItemUnparsed;
 import org.hiero.block.node.spi.blockmessaging.BlockItems;
 import org.hiero.block.node.spi.blockmessaging.BlockSource;
 import org.hiero.block.node.spi.blockmessaging.VerificationNotification;
+import org.hiero.block.node.verification.session.VerificationProofMetrics;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -102,9 +103,10 @@ class RsaWrbVerificationTest {
 
     @BeforeAll
     static void generateKeysAndPayload() throws Exception {
-        // 1024-bit RSA keys are used for test speed only — production network uses 4096-bit keys.
+        // 2048-bit RSA keys are used for test speed only — production network uses 4096-bit keys.
+        // CodeQL flags anything below 2048 as a weak-key warning even in test code, so we stay at 2048.
         final KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(1024);
+        kpg.initialize(2048);
         // Generate the 6-node pool used by the fixed-roster tests.
         for (long nodeId = 0; nodeId < ROSTER_SIZE; nodeId++) {
             final KeyPair kp = kpg.generateKeyPair();
@@ -179,6 +181,39 @@ class RsaWrbVerificationTest {
     }
 
     /**
+     * Builds a `BlockItemUnparsed` list representing a WRB block with multiple `BLOCK_PROOF`
+     * items, one per `SignedRecordFileProof`. Used to test the multi-proof verification path.
+     *
+     * @param signaturesPerProof one signature list per `BLOCK_PROOF` item to append
+     * @return list of unparsed block items ready to pass to `processBlockItems`
+     */
+    private static List<BlockItemUnparsed> buildWrbBlockWithMultipleProofs(
+            final List<List<RecordFileSignature>> signaturesPerProof) {
+        final BlockHeader header =
+                new BlockHeader(HAPI_VERSION, SW_VERSION, BLOCK_NUMBER, BLOCK_TIMESTAMP, BlockHashAlgorithm.SHA2_384);
+        final BlockFooter footer = new BlockFooter(Bytes.EMPTY, Bytes.EMPTY, Bytes.EMPTY);
+
+        final List<BlockItemUnparsed> items = new ArrayList<>();
+        items.add(BlockItemUnparsed.newBuilder()
+                .blockHeader(BlockHeader.PROTOBUF.toBytes(header))
+                .build());
+        items.add(BlockItemUnparsed.newBuilder().recordFile(recordFileItemBytes).build());
+        items.add(BlockItemUnparsed.newBuilder()
+                .blockFooter(BlockFooter.PROTOBUF.toBytes(footer))
+                .build());
+        for (final List<RecordFileSignature> signatures : signaturesPerProof) {
+            final BlockProof proof = BlockProof.newBuilder()
+                    .block(BLOCK_NUMBER)
+                    .signedRecordFileProof(new SignedRecordFileProof(6, signatures))
+                    .build();
+            items.add(BlockItemUnparsed.newBuilder()
+                    .blockProof(BlockProof.PROTOBUF.toBytes(proof))
+                    .build());
+        }
+        return items;
+    }
+
+    /**
      * Runs a single-call verification through `ExtendedMerkleTreeSession` using the given
      * key map and signatures.
      */
@@ -186,7 +221,7 @@ class RsaWrbVerificationTest {
             final Map<Long, PublicKey> keyMap, final List<RecordFileSignature> signatures) throws Exception {
         final List<BlockItemUnparsed> items = buildWrbBlock(signatures);
         final ExtendedMerkleTreeSession session = new ExtendedMerkleTreeSession(
-                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, keyMap, null, null, null);
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, keyMap, VerificationProofMetrics.NONE);
         return session.processBlockItems(new BlockItems(items, BLOCK_NUMBER, true, true));
     }
 
@@ -372,6 +407,44 @@ class RsaWrbVerificationTest {
     }
 
     @Test
+    @DisplayName("multiple RSA proofs all valid are accepted")
+    void multipleValidProofs_accepted() throws Exception {
+        // Two RSA proofs, both with the threshold of 4 valid signatures — both must verify.
+        final List<List<RecordFileSignature>> proofs =
+                List.of(signaturesFor(0L, 1L, 2L, 3L), signaturesFor(0L, 1L, 2L, 3L, 4L, 5L));
+        final List<BlockItemUnparsed> items = buildWrbBlockWithMultipleProofs(proofs);
+        final ExtendedMerkleTreeSession session = new ExtendedMerkleTreeSession(
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
+        final VerificationNotification result =
+                session.processBlockItems(new BlockItems(items, BLOCK_NUMBER, true, true));
+
+        assertNotNull(result);
+        assertTrue(result.success(), "Block with multiple valid RSA proofs must be accepted");
+        assertNotNull(result.blockHash(), "Block hash must be set on success");
+        assertNotNull(result.block(), "Block must be present on success");
+    }
+
+    @Test
+    @DisplayName("multiple RSA proofs with one failing causes block rejection")
+    void multipleProofs_oneFailing_rejected() throws Exception {
+        // First proof is valid at threshold; second proof has too few valid signatures.
+        // The block must be rejected because every RSA proof present must pass verification.
+        final List<List<RecordFileSignature>> proofs = List.of(
+                signaturesFor(0L, 1L, 2L, 3L, 4L, 5L),
+                signaturesFor(0L, 1L, 2L)); // 3 valid sigs — below strict majority for 6-node roster
+        final List<BlockItemUnparsed> items = buildWrbBlockWithMultipleProofs(proofs);
+        final ExtendedMerkleTreeSession session = new ExtendedMerkleTreeSession(
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
+        final VerificationNotification result =
+                session.processBlockItems(new BlockItems(items, BLOCK_NUMBER, true, true));
+
+        assertNotNull(result);
+        assertFalse(result.success(), "Block must be rejected when any RSA proof present fails verification");
+        assertNull(result.blockHash(), "Block hash must not be set on failure");
+        assertNull(result.block(), "Block must not be present on failure");
+    }
+
+    @Test
     @DisplayName("unsupported proof version (V5) is rejected")
     void unsupportedVersion_rejected() throws Exception {
         final List<BlockItemUnparsed> items;
@@ -399,7 +472,7 @@ class RsaWrbVerificationTest {
                             .build());
         }
         final ExtendedMerkleTreeSession session = new ExtendedMerkleTreeSession(
-                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, null, null, null);
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
         final VerificationNotification result =
                 session.processBlockItems(new BlockItems(items, BLOCK_NUMBER, true, true));
 
@@ -448,7 +521,7 @@ class RsaWrbVerificationTest {
                             .build());
         }
         final ExtendedMerkleTreeSession session = new ExtendedMerkleTreeSession(
-                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, null, null, null);
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
         final VerificationNotification result =
                 session.processBlockItems(new BlockItems(items, BLOCK_NUMBER, true, true));
 
@@ -490,7 +563,7 @@ class RsaWrbVerificationTest {
 
         // Case 1: empty RECORD_FILE bytes — nothing to extract → field not found → Bytes.EMPTY → fail
         final ExtendedMerkleTreeSession session1 = new ExtendedMerkleTreeSession(
-                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, null, null, null);
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
         final VerificationNotification result1 = session1.processBlockItems(
                 new BlockItems(buildWrbBlockWithCustomRecordFile(Bytes.EMPTY, sigs), BLOCK_NUMBER, true, true));
         assertNotNull(result1);
@@ -500,7 +573,7 @@ class RsaWrbVerificationTest {
         // Tag=0x0A (field 1, LEN), length=1, one payload byte
         final Bytes field1Only = Bytes.wrap(new byte[] {0x0A, 0x01, 0x42});
         final ExtendedMerkleTreeSession session2 = new ExtendedMerkleTreeSession(
-                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, null, null, null);
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
         final VerificationNotification result2 = session2.processBlockItems(
                 new BlockItems(buildWrbBlockWithCustomRecordFile(field1Only, sigs), BLOCK_NUMBER, true, true));
         assertNotNull(result2);
@@ -510,7 +583,7 @@ class RsaWrbVerificationTest {
         // Tag = (1 << 3) | 3 = 0x0B (field 1, wire 3 = SGROUP — unused in proto3 but valid tag encoding)
         final Bytes unknownWireType = Bytes.wrap(new byte[] {0x0B});
         final ExtendedMerkleTreeSession session3 = new ExtendedMerkleTreeSession(
-                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, null, null, null);
+                BLOCK_NUMBER, BlockSource.PUBLISHER, null, null, null, KEY_MAP, VerificationProofMetrics.NONE);
         final VerificationNotification result3 = session3.processBlockItems(
                 new BlockItems(buildWrbBlockWithCustomRecordFile(unknownWireType, sigs), BLOCK_NUMBER, true, true));
         assertNotNull(result3);
