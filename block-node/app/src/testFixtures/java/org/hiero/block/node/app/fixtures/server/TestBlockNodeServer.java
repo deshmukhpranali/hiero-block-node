@@ -19,15 +19,20 @@ import java.util.List;
 import org.hiero.block.api.BlockEnd;
 import org.hiero.block.api.BlockItemSet;
 import org.hiero.block.api.BlockNodeServiceInterface;
+import org.hiero.block.api.BlockRange;
 import org.hiero.block.api.BlockStreamSubscribeServiceInterface;
+import org.hiero.block.api.RosterEntry;
 import org.hiero.block.api.ServerStatusDetailResponse;
 import org.hiero.block.api.ServerStatusRequest;
 import org.hiero.block.api.ServerStatusResponse;
 import org.hiero.block.api.SubscribeStreamRequest;
 import org.hiero.block.api.SubscribeStreamResponse;
 import org.hiero.block.api.SubscribeStreamResponse.Code;
+import org.hiero.block.api.TssData;
+import org.hiero.block.api.TssRoster;
 import org.hiero.block.node.spi.historicalblocks.BlockAccessor;
 import org.hiero.block.node.spi.historicalblocks.HistoricalBlockFacility;
+import org.hiero.block.node.spi.historicalblocks.LongRange;
 
 public class TestBlockNodeServer {
     private final WebServer webServer;
@@ -209,7 +214,68 @@ public class TestBlockNodeServer {
         @Override
         @NonNull
         public ServerStatusDetailResponse serverStatusDetail(@NonNull ServerStatusRequest request) {
-            return ServerStatusDetailResponse.DEFAULT;
+            List<BlockRange> blockRanges = new ArrayList<>();
+
+            BlockRange.Builder blockRangeBuilder = BlockRange.newBuilder();
+
+            for (LongRange longRange :
+                    historicalBlockFacility.availableBlocks().streamRanges().toList()) {
+                blockRanges.add(blockRangeBuilder
+                        .rangeStart(longRange.start())
+                        .rangeEnd(longRange.end())
+                        .build());
+            }
+
+            // Todo: add TssData flexibility to TestBlockNodeServer to allow tests to pass in TssData to hand back to
+            // tests
+            return ServerStatusDetailResponse.newBuilder()
+                    .availableRanges(blockRangeBuilder.build())
+                    .tssData(buildTssData(
+                            Bytes.fromHex("01010101"),
+                            Bytes.fromHex("02020202"),
+                            List.of(buildRosterEntry(11, 22, Bytes.fromHex("03030303"))),
+                            250,
+                            50))
+                    .build();
+        }
+
+        /// build a `TssData` object from individual fields from the `TssBootstrapConfig`
+        ///
+        /// @param ledgerId The ledgerId Bytes
+        /// @param wrapsVerificationKey The wrapsVerificationKey Bytes
+        /// @param validFromBlock The block from which this TssData is valid
+        /// @param rosterValidFromBlock The block from which this TssRoster is valid
+        /// @return a `TssData` object
+        private TssData buildTssData(
+                Bytes ledgerId,
+                Bytes wrapsVerificationKey,
+                List<RosterEntry> rosterEntries,
+                long validFromBlock,
+                long rosterValidFromBlock) {
+            TssRoster tssRoster = TssRoster.newBuilder()
+                    .rosterEntries(rosterEntries)
+                    .validFromBlock(rosterValidFromBlock)
+                    .build();
+            return TssData.newBuilder()
+                    .ledgerId(ledgerId)
+                    .wrapsVerificationKey(wrapsVerificationKey)
+                    .currentRoster(tssRoster)
+                    .validFromBlock(validFromBlock)
+                    .build();
+        }
+
+        /// build a `RosterEntry`object from individual fields
+        ///
+        /// @param nodeId The node id
+        /// @param weight The weight
+        /// @param schnorrPublicKey The schnorrPublicKey Bytes
+        /// @return a `RosterEntry` object
+        private RosterEntry buildRosterEntry(long nodeId, long weight, Bytes schnorrPublicKey) {
+            return RosterEntry.newBuilder()
+                    .nodeId(nodeId)
+                    .weight(weight)
+                    .schnorrPublicKey(schnorrPublicKey)
+                    .build();
         }
     }
 }
