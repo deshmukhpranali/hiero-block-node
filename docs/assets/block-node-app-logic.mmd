@@ -1,0 +1,49 @@
+%%{init: {"flowchart": {"htmlLabels": true}} }%%
+flowchart LR
+    CNP([BlockStream Publisher])
+    GRC([gRPC Client])
+    GRS([gRPC Subscriber])
+    BRQ([Block Requestor])
+    NSR([NodeStatus Requestor])
+
+    subgraph BNS["BlockNode Server"]
+        subgraph Core["BlockNode Core Modules"]
+            BNA[BlockNodeApp]
+            SPI[SPI]
+            MSG[Messaging]
+            HLT[Health]
+        end
+        subgraph Plugins["BlockNode Add-On Modules"]
+            SPB[StreamPublisher]
+            SSB[StreamSubscriber]
+            BAC[BlockAccess]
+            SVS[ServerStatus]
+            BVS[BlockVerification]
+            BLP[BlockProviders]
+            CSA[CloudStorageArchive]
+            CSE[CloudStorageExpanded]
+            RSA[RsaRosterBootstrap]
+            TSS[RosterBootstrapTss]
+            BKF[Backfill]
+        end
+    end
+
+    CNP -->|publish| SPB
+    GRS -->|subscribe| SSB
+    GRC -->|getBlock| BAC
+    BRQ -->|getBlock| BAC
+    NSR -->|serverStatus| SVS
+
+    BNA --- SPI
+    BNA --> MSG
+    MSG --> SPB
+    MSG --> SSB
+    MSG --> BVS
+    MSG --> BLP
+    MSG --> BAC
+    MSG --> SVS
+    BLP --> CSA
+    BLP --> CSE
+    BNA --> RSA
+    BNA --> TSS
+    SSB --> BKF
