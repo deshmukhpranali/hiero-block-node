@@ -70,18 +70,20 @@ For full capacity derivations and planning models, see
 ## Firewall and connectivity
 
 The Block Node exposes per-service ports. Lock inbound access to the **publisher port**
-(`40984`) to Consensus Node source IPs provided by Hashgraph DevOps. The remaining
-per-service ports are accessible to their respective clients. Deny all other inbound by
-default.
+(`40984`) to Consensus Node source IPs provided by Hashgraph DevOps. The subscriber and
+block-access ports are open to the general public; Solo Provisioner applies traffic shaping
+to prioritize peer Block Nodes and configured Mirror Nodes. The server-status port is also
+publicly accessible and is queried by CN, MN, peer Block Nodes, and operators. The health
+port is intra-cluster only.
 
-| Port  |    Service    |                  Restrict to                   |
-|-------|---------------|------------------------------------------------|
-| 40984 | Publisher     | Consensus Node source IPs (Hashgraph-provided) |
-| 40980 | Subscriber    | Mirror Nodes and peer Block Nodes              |
-| 40981 | Block Access  | Authorized clients                             |
-| 40982 | Server Status | Monitoring and operators                       |
-| 40983 | Health        | Monitoring and operators                       |
-| 40840 | LoadBalancer  | External clients (MetalLB front-end)           |
+| Port  |    Service    |                                                    Accessible to                                                     |
+|-------|---------------|----------------------------------------------------------------------------------------------------------------------|
+| 40984 | Publisher     | Consensus Node source IPs only (Hashgraph-provided)                                                                  |
+| 40980 | Subscriber    | General public (Solo Provisioner applies traffic shaping to prioritize peer Block Nodes and configured Mirror Nodes) |
+| 40981 | Block Access  | General public (Solo Provisioner applies traffic shaping to prioritize peer Block Nodes and configured Mirror Nodes) |
+| 40982 | Server Status | General public (used by CN, MN, peer Block Nodes, and operators)                                                     |
+| 40983 | Health        | Intra-cluster only (kubelet liveness/readiness probes)                                                               |
+| 40840 | LoadBalancer  | External clients (MetalLB front-end)                                                                                 |
 
 ```bash
 # nftables
